@@ -12,6 +12,10 @@ type SizeEntry = {
   computedAt: number;
   isDir?: boolean;
   approx?: boolean;        // true if truncated by budget
+  files?: number;
+  dirs?: number;
+  excluded?: number;
+  elapsedMs?: number;
 };
 
 const CACHE_TTL_MS = 15_000;                 // refresh size cache every 15s
@@ -94,15 +98,6 @@ export function activate(context: vscode.ExtensionContext) {
         } else if (mode === 'full') {
           badge = twoCharBadge(stat.size);  // files as before
         }
-        // Decide badge (avoid color/bubble so we don't override Git/Problems colors)
-        // let badge: string | undefined;
-        // if (isFolder) {
-        //   const indicator = (config().get<'calculating'|'off'>('folderHoverIndicator') || 'calculating');
-        //   // show ⏳ only while computing (no persistent dot)
-        //   if (indicator !== 'off' && stat.size < 0) badge = '⏳';
-        // } else if (isFull) {
-        //   badge = twoCharBadge(stat.size); // files only
-        // }
 
         const decoration: vscode.FileDecoration = {
           ...(badge ? { badge } : {}),
@@ -214,8 +209,17 @@ export function activate(context: vscode.ExtensionContext) {
     if (!inflight.has(key)) {
       inflight.set(key, (async () => {
         try {
-          const { total, approx } = await dirSizeBudgeted(uri);
-          cache.set(key, { size: total, computedAt: Date.now(), isDir: true, approx });
+          const { total, approx, files, dirs, excluded, elapsedMs } = await dirSizeBudgeted(uri);
+          cache.set(key, {
+            size: total,
+            computedAt: Date.now(),
+            isDir: true,
+            approx,
+            files,
+            dirs,
+            excluded,
+            elapsedMs
+          });
         } finally {
           inflight.delete(key);
           onDidChangeFileDecorations.fire(uri); // refresh when ready
@@ -238,11 +242,14 @@ export function activate(context: vscode.ExtensionContext) {
     const MAX_TIME_MS = budget.maxTimeMs;
 
     let total = 0;
-    let filesVisited = 0;
+    let files = 0;
+    let dirs = 0;
+    let excluded = 0;
     let approx = false;
-    const start = Date.now();
 
+    const start = Date.now();
     const q: vscode.Uri[] = [root];
+
     while (q.length) {
       const cur = q.shift()!;
       let entries: [string, vscode.FileType][];
@@ -250,19 +257,20 @@ export function activate(context: vscode.ExtensionContext) {
 
       for (const [name, type] of entries) {
         const child = vscode.Uri.joinPath(cur, name);
-        if (isExcluded(child)) continue;
+        if (isExcluded(child)) { excluded++; continue; }
 
         if (type & vscode.FileType.Directory) {
+          dirs++;
           q.push(child);
         } else {
           try {
             const st = await vscode.workspace.fs.stat(child);
             total += st.size;
-            filesVisited++;
+            files++;
           } catch { /* ignore unreadable */ }
         }
 
-        if (filesVisited >= MAX_ENTRIES || (Date.now() - start) > MAX_TIME_MS) {
+        if (files >= MAX_ENTRIES || (Date.now() - start) > MAX_TIME_MS) {
           approx = true;
           break;
         }
@@ -270,7 +278,8 @@ export function activate(context: vscode.ExtensionContext) {
       if (approx) break;
     }
 
-    return { total, approx };
+    const elapsedMs = Date.now() - start;
+    return { total, approx, files, dirs, excluded, elapsedMs };
   }
 
   /** Compact 2-char badge for files. */
@@ -294,10 +303,30 @@ export function activate(context: vscode.ExtensionContext) {
     const name = uri.path.split('/').pop() || '';
 
     if (s.isDir) {
+      const name = uri.path.split('/').pop() || '';
       if (Number.isNaN(s.size)) return `${name}\nFolder (size disabled)`;
       if (s.size < 0)          return `${name}\nCalculating folder size…`;
+
       const exact = humanExact(s.size);
-      return `${name}\n${s.approx ? `~${exact} (approx)` : exact}`;
+      const approxMark = s.approx ? `~` : '';
+      const cacheAgeSec = Math.max(0, Math.floor((Date.now() - s.computedAt) / 1000));
+
+      const itemsLine =
+        (typeof s.files === 'number' || typeof s.dirs === 'number')
+          ? `\nItems: ${s.files ?? 0} files • ${s.dirs ?? 0} dirs`
+          : '';
+
+      const excludedLine =
+        (typeof s.excluded === 'number' && s.excluded > 0)
+          ? `\nExcluded: ${s.excluded} matches (from excludeGlobs)`
+          : '';
+
+      const elapsedLine =
+        (typeof s.elapsedMs === 'number')
+          ? `\nScanned in ${s.elapsedMs} ms • Cache age ${cacheAgeSec} s`
+          : `\nCache age ${cacheAgeSec} s`;
+
+      return `${name}\n${approxMark}${exact}${s.approx ? ' (approx)' : ''}${itemsLine}${excludedLine}${elapsedLine}`;
     }
 
     // Files

@@ -6,6 +6,11 @@ Semantic Versioning.
 
 ---
 
+## 1.0.1 — 2025-08-27
+- Marketplace: add Visualization category
+- Folder tooltips: show item counts, excluded matches, elapsed time, and cache age
+- Add “Show Folder Size” command in Explorer context menu
+
 ## [0.0.6] — 2025-08-18
 ### Added
 - README: embedded **demo GIF** and “deep-dive” feature docs.

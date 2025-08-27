@@ -2,10 +2,10 @@
   "name": "explorer-file-sizes",
   "displayName": "Explorer File Sizes",
   "description": "Tiny, fast file size badges in the VS Code Explorer with tooltips and optional folder sizes.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "BrianDooley",
   "engines": { "vscode": "^1.90.0" },
-  "categories": ["Other"],
+  "categories": ["Other", "Visualization"],
   "keywords": ["explorer", "file size", "file sizes", "decorations", "badge", "tooltip","explorer",
     "file-size", "folder-size", "sizes", "filesize", "badges", "tooltip", "decorations", "file-decorations",
     "explorer-decorations", "hover", "status-bar", "disk-usage", "resource-usage", "performance", "glob",
@@ -38,7 +38,7 @@
         },
         "explorerFileSizes.enableFolderSizes": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "If true, compute folder sizes recursively (may be slow on large trees)."
         },
         "explorerFileSizes.folderHoverIndicator": {
@@ -62,11 +62,19 @@
       }
     },
     "commands": [
-      { "command": "explorerFileSizes.showFolderSize", "title": "Show Folder Size", "category": "Explorer File Sizes" }
+      {
+        "command": "explorerFileSizes.showFolderSize",
+        "title": "Explorer File Sizes: Show Folder Size",
+        "category": "Explorer File Sizes"
+      }
     ],
     "menus": {
       "explorer/context": [
-        { "command": "explorerFileSizes.showFolderSize", "when": "explorerResourceIsFolder" }
+        {
+          "command": "explorerFileSizes.showFolderSize",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@50"
+        }
       ]
     }
   },
