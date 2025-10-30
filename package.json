@@ -2,7 +2,7 @@
   "name": "explorer-file-sizes",
   "displayName": "Explorer File Sizes",
   "description": "Tiny, fast file size badges in the VS Code Explorer with tooltips and optional folder sizes.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "publisher": "BrianDooley",
   "engines": {
     "vscode": "^1.90.0"

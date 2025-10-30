@@ -11,7 +11,6 @@ import { exec } from 'child_process';
 type SizeEntry = {
   size: number;            // bytes; -1 = calculating; NaN = disabled/unavailable
   mtime?: number;
-  computedAt: number;
   isDir?: boolean;
   approx?: boolean;        // true if truncated by budget
   files?: number;
@@ -20,7 +19,6 @@ type SizeEntry = {
   elapsedMs?: number;
 };
 
-const CACHE_TTL_MS = 15_000;                 // refresh size cache every 15s
 const inflight = new Map<string, Promise<void>>(); // running folder jobs
 let excludeMatchers: Minimatch[] = [];       // compiled globs
 
@@ -76,7 +74,6 @@ export function activate(context: vscode.ExtensionContext) {
     const touch = (u: vscode.Uri) => {
       const k = u.toString();
       if (!touched.has(k)) {
-        cache.delete(k);
         touched.add(k);
       }
     };
@@ -125,7 +122,6 @@ export function activate(context: vscode.ExtensionContext) {
   // Compile exclude globs once at startup
   loadExcludeGlobs();
 
-  const cache = new Map<string, SizeEntry>();
   // allow `undefined` so we can refresh EVERYTHING at once
   const onDidChangeFileDecorations = new vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>();
 
@@ -179,7 +175,6 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('explorerFileSizes.refreshAll', async () => {
-      cache.clear();
       onDidChangeFileDecorations.fire(undefined); // refresh everything
       updateStatus(vscode.window.activeTextEditor?.document?.uri);
       vscode.window.showInformationMessage('Explorer File Sizes: refreshed.');
@@ -210,7 +205,6 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.registerFileDecorationProvider(provider),
 
     vscode.workspace.onDidSaveTextDocument(doc => {
-      cache.delete(doc.uri.toString());
       onDidChangeFileDecorations.fire(doc.uri);
       if (vscode.window.activeTextEditor?.document?.uri.toString() === doc.uri.toString()) {
         updateStatus(doc.uri);
@@ -218,20 +212,14 @@ export function activate(context: vscode.ExtensionContext) {
     }),
 
     vscode.workspace.onDidCreateFiles(e => {
-      for (const f of e.files) cache.delete(f.toString());
       onDidChangeFileDecorations.fire([...e.files]); // spread to fix readonly Uri[]
     }),
 
     vscode.workspace.onDidDeleteFiles(e => {
-      for (const f of e.files) cache.delete(f.toString());
       onDidChangeFileDecorations.fire([...e.files]); // spread to fix readonly Uri[]
     }),
 
     vscode.workspace.onDidRenameFiles(e => {
-      for (const { oldUri, newUri } of e.files) {
-        cache.delete(oldUri.toString());
-        cache.delete(newUri.toString());
-      }
       onDidChangeFileDecorations.fire(e.files.map(f => f.newUri));
     }),
 
@@ -240,7 +228,6 @@ export function activate(context: vscode.ExtensionContext) {
         loadExcludeGlobs();
       }
       if (e.affectsConfiguration('explorerFileSizes')) {
-        cache.clear();
         onDidChangeFileDecorations.fire(undefined); // refresh EVERYTHING (Explorer, tabs, etc.)
         updateStatus(vscode.window.activeTextEditor?.document?.uri);
       }
@@ -257,9 +244,6 @@ export function activate(context: vscode.ExtensionContext) {
   /** Return size info for files immediately; folders compute async with budget. */
   async function getSize(uri: vscode.Uri): Promise<SizeEntry | undefined> {
     const key = uri.toString();
-    const now = Date.now();
-    const cached = cache.get(key);
-    if (cached && now - cached.computedAt < CACHE_TTL_MS) return cached;
 
     // fs.stat
     let fsStat: vscode.FileStat | undefined;
@@ -268,47 +252,51 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Files: return immediately
     if (!isDir) {
-      const entry: SizeEntry = { size: fsStat.size, mtime: fsStat.mtime, computedAt: now, isDir: false };
-      cache.set(key, entry);
+      const entry: SizeEntry = { size: fsStat.size, mtime: fsStat.mtime, isDir: false };
       return entry;
     }
 
     // Folders: if disabled, mark as unavailable (we'll hide decoration)
     if (!config().get<boolean>('enableFolderSizes')) {
-      const entry: SizeEntry = { size: NaN, computedAt: now, isDir: true };
-      cache.set(key, entry);
+      const entry: SizeEntry = { size: NaN, isDir: true };
       return entry;
     }
-
-    // If we already have a recent computed value, use it
-    if (cached && !Number.isNaN(cached.size) && cached.size >= 0) return cached;
 
     // Kick off background job if not already running
     if (!inflight.has(key)) {
       inflight.set(key, (async () => {
         try {
           const { total, approx, files, dirs, excluded, elapsedMs } = await dirSizeBudgeted(uri);
-          cache.set(key, {
-            size: total,
-            computedAt: Date.now(),
-            isDir: true,
-            approx,
-            files,
-            dirs,
-            excluded,
-            elapsedMs
-          });
+          // After computation, refresh decorations
+          onDidChangeFileDecorations.fire(uri);
         } finally {
           inflight.delete(key);
-          onDidChangeFileDecorations.fire(uri); // refresh when ready
         }
       })());
     }
 
-    // Return a "calculating" placeholder
-    const pending: SizeEntry = { size: -1, computedAt: now, isDir: true };
-    cache.set(key, pending);
-    return pending;
+    // Check if computation is in progress
+    if (inflight.has(key)) {
+      // Return a "calculating" placeholder
+      const pending: SizeEntry = { size: -1, isDir: true };
+      return pending;
+    }
+
+    // If we reach here, computation completed, compute size again
+    try {
+      const { total, approx, files, dirs, excluded, elapsedMs } = await dirSizeBudgeted(uri);
+      return {
+        size: total,
+        isDir: true,
+        approx,
+        files,
+        dirs,
+        excluded,
+        elapsedMs
+      };
+    } catch {
+      return { size: NaN, isDir: true };
+    }
   }
 
   /** Folder walk with time/entry budget to keep UI responsive. */
@@ -387,7 +375,6 @@ export function activate(context: vscode.ExtensionContext) {
 
       const exact = humanExact(s.size);
       const approxMark = s.approx ? `~` : '';
-      const cacheAgeSec = Math.max(0, Math.floor((Date.now() - s.computedAt) / 1000));
 
       const itemsLine =
         (typeof s.files === 'number' || typeof s.dirs === 'number')
@@ -401,8 +388,8 @@ export function activate(context: vscode.ExtensionContext) {
 
       const elapsedLine =
         (typeof s.elapsedMs === 'number')
-          ? `\nScanned in ${s.elapsedMs} ms • Cache age ${cacheAgeSec} s`
-          : `\nCache age ${cacheAgeSec} s`;
+          ? `\nScanned in ${s.elapsedMs} ms`
+          : '';
 
       return `${name}\n${approxMark}${exact}${s.approx ? ' (approx)' : ''}${itemsLine}${excludedLine}${elapsedLine}`;
     }
