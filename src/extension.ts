@@ -5,6 +5,8 @@
  */
 import * as vscode from 'vscode';
 import { Minimatch } from 'minimatch';
+import util from 'util';
+import { exec } from 'child_process';
 
 type SizeEntry = {
   size: number;            // bytes; -1 = calculating; NaN = disabled/unavailable
@@ -185,16 +187,19 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   // Command: on-demand folder size with larger budget + progress UX (works even if another badge wins)
+  const execAsync = util.promisify(exec);
   context.subscriptions.push(
     vscode.commands.registerCommand('explorerFileSizes.showFolderSize', async (uri: vscode.Uri) => {
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: 'Calculating folder size…' },
         async () => {
           try {
-            const { total, approx } = await dirSizeBudgeted(uri, { maxEntries: 100_000, maxTimeMs: 5_000 });
-            vscode.window.showInformationMessage(`Folder size: ${approx ? '~' : ''}${humanExact(total)}${approx ? ' (approx)' : ''}`);
-          } catch {
+            const { stdout } = await execAsync(`du -sh "${uri.fsPath}"`);
+            const size = stdout.split('\t')[0].trim();
+            vscode.window.showInformationMessage(`Folder size: ${size}`);
+          } catch (err) {
             vscode.window.showErrorMessage('Failed to compute folder size.');
+            console.error(err);
           }
         }
       );
